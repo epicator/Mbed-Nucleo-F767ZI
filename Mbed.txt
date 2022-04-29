@@ -1,0 +1,340 @@
+/* mbed Microcontroller Library
+ * Copyright (c) 2019 ARM Limited
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "mbed.h"
+
+//-----------------------------------------Pins-----------------------------------------//
+
+//LED lights on the board
+DigitalOut led1(LED1);
+DigitalOut led2(LED2);
+DigitalOut led3(LED3);
+//Motor control from the dual H-Bridge module.
+DigitalOut Left_Motor_forward(D8);                          //Pin:D8    Port:PF_13
+DigitalOut Left_Motor_reverse(D6);                          //Pin:D6    Port:PE_9
+PwmOut Left_Motor_Enable(D10);                              //Pin:D10   Port:PD_14
+DigitalOut Right_Motor_forward(D7);                         //Pin:D7    Port:PF_13
+DigitalOut Right_Motor_reverse(D5);                         //Pin:D5    Port:PE_11
+PwmOut Right_Motor_Enable(D9);                              //Pin:D9    Port:PD_15
+//Readings from the Ultrasonic sensors
+DigitalOut USTrigger(D14);                                  //Pin:D14   Port:PB_9
+DigitalIn USEcho(D15);                                      //Pin:D15   Port:PB_8
+//Current Posistion from the Servomotor
+PwmOut ServoMotorLocation(D3);                              //Pin:D3    Port:PA_3
+//IR sensor
+InterruptIn LeftIR(A1);                                                    
+InterruptIn CenterIR(A2);    
+InterruptIn RightIR(A3);                                                   
+
+//-----------------------------------------Preview-----------------------------------------//
+
+//Basic Setup
+void Init();
+void Stop();
+//Motor Directions
+void Move_Forward(float speed);
+void Move_Backward(float speed);
+void Rotate_Right(float speed);
+void Rotate_Left(float speed);
+//Test Motor Directions
+void idle();
+void Test_Motors(float speed, int time);
+//IR Interrupts
+void InterruptLeftIRFall();
+void InterruptLeftIRRise();
+void InterruptRightIRFall();
+void InterruptRightIRRise();
+void InterruptCenterIRFall();
+void InterruptCenterIRRise();
+//Detection Functions
+void ServoMotorScan();
+void USDistanceMeassure();
+bool DecideOnUSRightOrLeft();
+
+//Variables
+int EchoTimeus=0;               //US echo time.... ~340 m/sec which relates to distance.....
+float fUSDistance=0.0f;         //Variable that takes the previous variable and calculates the distance....
+float fDistanceArray[21];       //This is for creating an array for the US readings..... radar array. 
+
+//-----------------------------------------Main-Loop-----------------------------------------//
+
+int main()
+{
+//Define and bind LED
+    led1=0;
+    led2=0;
+    led3=0;
+    LeftIR.fall(&InterruptLeftIRFall);
+    LeftIR.rise(&InterruptLeftIRRise);
+    CenterIR.fall(&InterruptCenterIRFall);
+    CenterIR.rise(&InterruptCenterIRRise);
+    RightIR.fall(&InterruptRightIRFall);
+    RightIR.rise(&InterruptRightIRRise);
+//Intro
+    printf("Welcome to this script, which is running on Mbed OS %d.%d.%d.\n", MBED_MAJOR_VERSION, MBED_MINOR_VERSION, MBED_PATCH_VERSION);
+    printf("This program has been completed by Christin John Finny\r\nStudent number:17037949\r\nUniversity of Hertfordshire\r\n.\r\n.\r\n.\r\n");
+    for(int i=0; i<6; i++)
+    {
+        led1=!led1;
+        led2=!led2;
+        led3=!led3;
+    };
+//Setup
+    printf("Killing motors\r\n");
+    Stop();
+    printf("Setting the frequency of the left, right and servo motors\r\n");
+    Init();
+//Test
+    Test_Motors(0.4f,100);
+//Initial scan   
+    ServoMotorScan();
+    for(int i=0; i<21; i++)
+        printf("The distance array is %f\r\n", fDistanceArray[i]);
+    
+//Begin Driving
+    printf("\r\n**********************\r\n\r\nVehicle will now start\r\n\r\n**********************\r\n");
+    thread_sleep_for(100);
+    while (true){
+//Dead end detection
+        if(led1==1 && led2==1 && led3==1){
+            printf("Readings on all sides. Dead end protocol activated\r\n");
+            while(led1!=0 && led2!=0 && led3!=0)    
+                Move_Backward(0.1f);
+            ServoMotorScan();
+            for(int i=0; i<21; i++)
+                printf("The distance array is %f\r\n", fDistanceArray[i]);
+            Test_Motors(0.3f,50);
+        }
+//Angled wall detection
+        else if (led1==1){
+            Stop();
+            printf("Obstacle detected on the left\r\n");
+            while(led1!=0)
+                Rotate_Right(0.5f);
+        }
+        else if (led3==1){
+            Stop();
+            printf("Obstacle detected on the right\r\n");
+            while(led3!=0)
+                Rotate_Left(0.5f);
+        }
+//Centeral wall detection
+        else if (led2==1){
+            Stop();
+            printf("Obstacle detected in front\r\n");
+            ServoMotorScan();
+            DecideOnUSRightOrLeft();
+            if (DecideOnUSRightOrLeft()){
+                printf("More readings on the left side, therefore the vehicle will turn right\r\n");
+                while(led2!=0)
+                    Rotate_Right(0.5f);
+            }
+            else{
+                printf("More readings on the right side, therefore the vehicle will turn left\r\n");
+                while(led2!=0)
+                    Rotate_Left(0.5f);
+            }
+        }
+//Forward Drive
+        else {
+        Move_Forward(1.0f);
+        }
+    }
+return 0;
+}
+
+//-----------------------------------------Functions-----------------------------------------//
+
+//Setup Functions
+void Stop()
+{
+    Left_Motor_Enable=0.0f;
+    Right_Motor_Enable=0.0f;
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=0;
+    Left_Motor_forward=0;
+    printf("Motors terminated\r\n");
+    return;
+}
+void Init()
+{
+    Right_Motor_Enable.period_us(50);               //DC Right Motor PWM base Period = 50 usec-> 20 kHz
+    Left_Motor_Enable.period_us(50);                //DC Left Motor PWM base Period = 50 usec -> 20 kHz
+    ServoMotorLocation.period_us(20000);            //ServoMotor PWM base Period = 20 msec ->50 Hz
+    printf("All motor's frequencies are set to 50 Hz\r\n");
+    ServoMotorLocation=1.5f/20.0f;
+    return;
+}
+
+//LED_to_detection
+void InterruptLeftIRFall()      //Obstacle on the left detected
+{
+    led1=1;
+    return;
+}
+void InterruptLeftIRRise()      //Obstacle on the left is cleared
+{
+    led1=0;
+    return;
+}
+void InterruptCenterIRFall()    //Obstacle at the Center detected
+{
+    led2=1;
+    return;
+}
+void InterruptCenterIRRise()    //Obstacle at the Center is cleared
+{
+    led2=0;
+    return;
+}
+void InterruptRightIRFall()      //Obstacle on the Right detected
+{
+    led3=1;
+    return;
+}
+void InterruptRightIRRise()      //Obstacle on the Right is cleared
+{
+    led3=0;
+    return;
+}
+
+//Direction
+void ServoMotorScan()
+{
+    for(int i=0;i<21;i++)
+    {
+        ServoMotorLocation=((float)i*0.1f+0.5f)/20.0f;
+        USDistanceMeassure();  
+        fDistanceArray[i]= fUSDistance;
+        thread_sleep_for(150);
+    }
+    ServoMotorLocation=1.5f/20.0f;                  //Leave the US sensor pointing forward.
+    thread_sleep_for(200);
+    return;
+}
+void USDistanceMeassure()
+{
+        USTrigger=0;
+        wait_us(2);
+        USTrigger=1;
+        wait_us(10);
+        USTrigger=0;
+        EchoTimeus=0;
+        while(USEcho==0)
+            EchoTimeus=0;
+        while(USEcho==1)
+        {
+            wait_us(1);
+            EchoTimeus++;
+        }
+        fUSDistance=(float)EchoTimeus/30.0f/2.0f;
+        return;
+}
+bool DecideOnUSRightOrLeft()
+{
+float iRightSide=0;
+float iLeftSide=0;
+for(int i=0; i<11; i++)
+    iLeftSide+=fDistanceArray[i];               //Scans from left to right
+for(int i=10; i<21; i++)                        //So the first half of the array is left
+    iRightSide+=fDistanceArray[i];              //And the second half is right
+if(iLeftSide>=iRightSide)
+    return true;
+else
+    return false;
+}
+
+//Motor_controls
+void Move_Forward(float speed)
+{
+    printf("Robot moving forward\r\n");
+    Left_Motor_Enable=speed;
+    Right_Motor_Enable=speed;
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=1;
+    Left_Motor_forward=1;
+    return;
+}
+void Move_Backward(float speed)
+{
+    printf("Robot Move Backwards\r\n");
+    Left_Motor_Enable=speed;
+    Right_Motor_Enable=speed;
+    Right_Motor_reverse=1;
+    Left_Motor_reverse=1;
+    Right_Motor_forward=0;
+    Left_Motor_forward=0;
+    return;
+}
+void Rotate_Right(float speed)
+{
+    printf("Robot Rotate Right\r\n");
+    Left_Motor_Enable=speed;
+    Right_Motor_Enable=speed;
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=1;
+    Right_Motor_forward=1;
+    Left_Motor_forward=0;
+    return;
+}
+void Rotate_Left(float speed)
+{
+    printf("Robot Rotate Left\r\n");
+    Left_Motor_Enable=speed;
+    Right_Motor_Enable=speed;
+    Right_Motor_reverse=1;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=0;
+    Left_Motor_forward=1;
+    return;
+}
+
+//Testing
+void idle()
+{
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=0;
+    Left_Motor_forward=0;
+    return;
+}
+void Test_Motors(float speed, int time)
+{
+    printf("Beginning motor test\r\nThis test will be completed in %d seconds\r\n", 4*time);
+//Enable Motors
+    Left_Motor_Enable=speed;
+    Right_Motor_Enable=speed;
+//Test Forward
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=1;
+    Left_Motor_forward=1;
+    thread_sleep_for(time);
+    idle();
+//Test Backward
+    Right_Motor_reverse=1;
+    Left_Motor_reverse=1;
+    Right_Motor_forward=0;
+    Left_Motor_forward=0;
+    thread_sleep_for(time);
+    idle();
+//Test Left
+    Right_Motor_reverse=1;
+    Left_Motor_reverse=0;
+    Right_Motor_forward=0;
+    Left_Motor_forward=1;
+    thread_sleep_for(time);
+    idle();
+//Test Right
+    Right_Motor_reverse=0;
+    Left_Motor_reverse=1;
+    Right_Motor_forward=1;
+    Left_Motor_forward=0;
+    thread_sleep_for(time);
+    Stop();
+    return;
+}
